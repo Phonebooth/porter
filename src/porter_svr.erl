@@ -7,6 +7,7 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/0, get_source_port/3,
+        remove_source_port/4,
         return_source_port/4,
         age_source_port/4,
         set_port_range/1,
@@ -41,6 +42,11 @@ flush_aging_ports() ->
 get_source_port(IP, Port, Opts) ->
     % Get an ephemeral port number
     gen_server:call(?SERVER, {get_source_port, IP, Port, Opts}, infinity).
+
+remove_source_port(_IP, _Port, 0, _Opts) ->
+    ok;
+remove_source_port(IP, Port, SourcePort, Opts) ->
+    gen_server:cast(?SERVER, {remove_source_port, IP, Port, SourcePort, Opts}).
 
 return_source_port(_IP, _Port, 0, _Opts) ->
     ok;
@@ -106,6 +112,12 @@ handle_cast({return_source_port, IP, Port, SourcePort, _Opts}, State) ->
 handle_cast({age_source_port, IP, Port, SourcePort, _Opts}, State) ->
     AgingPool = get_addr_aging_pool(IP, Port, State),
     ets:insert(AgingPool, pool_entry(SourcePort)),
+    {noreply, State};
+handle_cast({remove_source_port, IP, Port, SourcePort, _Opts}, State) ->
+    Pool = get_addr_pool(IP, Port, State),
+    ets:delete(Pool, SourcePort),
+    AgingPool = get_addr_aging_pool(IP, Port, State),
+    ets:delete(AgingPool, SourcePort),
     {noreply, State}.
 
 handle_info(aging_flush, State) ->

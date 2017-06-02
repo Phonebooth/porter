@@ -52,35 +52,74 @@ connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, _LastRespons
     Opts2 = lists:keystore(port, 1, Opts, {port, MySrcPort}),
     Opts3 = lists:keystore(reuseaddr, 1, Opts2, {reuseaddr, true}),
     case Module:connect(IP, Port, Opts3, Timeout) of
-        NotAvail={error, eaddrnotavail} ->
+        PortError={error, Reason} when Reason =:= eaddrnotavail orelse
+                                       Reason =:= eaddrinuse ->
+            % eaddrnotavail is returned from a connect() system call when there
+            % is already a socket existing for THIS {sip, sport, dip, dport}
+            % in the kernel. (could be a socket in TIME-WAIT)
+
+            % eaddrinuse is returned from a bind() system call when there is
+            % already a socket existing for a DIFFERENT {sip, sport, dip, dport}
+            % in the kernel that did NOT specify the SO_REUSEADDR flag.
+
             % if porter_svr gave a port and it turned out to be bad (eg TIME-WAIT)
             % we will retry a certain number of times. All the while, collecting
             % the bad ports, and at the end of the retry, put them back into aging
             case MySrcPort of
                 0 ->
                     AgeBadPorts(),
-                    NotAvail;
+                    PortError;
                 _ ->
-                    RemAttempts2 = case RemainingAttempts of
-                        undefined ->
-                            Policy = application:get_env(porter, retry_policy, []),
-                            Attempts = proplists:get_value(attempts, Policy, 0),
-                            Attempts;
-                        _ ->
-                            RemainingAttempts - 1
-                    end,
+                    RemAttempts2 = get_remaining_connect_attempts(RemainingAttempts),
                     connect_attempt(Module, IP, Port, Opts, Timeout, RemAttempts2,
-                        NotAvail, [MySrcPort|BadPorts])
+                        PortError, [MySrcPort|BadPorts])
             end;
         {error, Reason} ->
             AgeBadPorts(),
             porter_svr:age_source_port(IP, Port, MySrcPort, Opts),
             {error, Reason};
         {ok, Socket} ->
+            MySrcPort2 = ensure_source_port_tracked(Module, Socket,
+                IP, Port, MySrcPort, Opts),
             AgeBadPorts(),
             PorterState = #{ip => IP,
                             port => Port,
-                            source_port => MySrcPort,
+                            source_port => MySrcPort2,
                             opts => Opts},
             {ok, Socket, PorterState}
+    end.
+
+get_remaining_connect_attempts(undefined) ->
+    Policy = application:get_env(porter, retry_policy, []),
+    Attempts = proplists:get_value(attempts, Policy, 0),
+    Attempts;
+get_remaining_connect_attempts(0) ->
+    0;
+get_remaining_connect_attempts(RemAttempts) ->
+    RemAttempts - 1.
+
+ensure_source_port_tracked(Module, Socket, IP, Port, MySrcPort, Opts) ->
+    % if MySrcPort is 0, we should get and mark the real port as in use in
+    % the porter_svr, and return it as part of the PorterState
+    case MySrcPort of
+        0 ->
+            case get_auto_port(Module, Socket) of
+                {ok, ActualPort} ->
+                    porter_svr:remove_source_port(IP, Port, ActualPort, Opts),
+                    ActualPort;
+                _ ->
+                    o
+            end;
+        _ ->
+            MySrcPort
+    end.
+
+get_auto_port(gen_tcp, Socket) ->
+    inet:port(Socket);
+get_auto_port(ssl, Socket) ->
+    case ssl:sockname(Socket) of
+        {ok, {_, Port}} ->
+            {ok, Port};
+        Er ->
+            Er
     end.
