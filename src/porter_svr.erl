@@ -105,20 +105,38 @@ handle_call({flush_aging_ports}, _From, State) ->
 
 handle_cast({set_port_range, PortRange}, State) ->
     {noreply, State#{port_range => PortRange}};
-handle_cast({return_source_port, IP, Port, SourcePort, _Opts}, State) ->
-    Pool = get_addr_pool(IP, Port, State),
-    ets:insert(Pool, pool_entry(SourcePort)),
-    {noreply, State};
-handle_cast({age_source_port, IP, Port, SourcePort, _Opts}, State) ->
-    AgingPool = get_addr_aging_pool(IP, Port, State),
-    ets:insert(AgingPool, pool_entry(SourcePort)),
-    {noreply, State};
-handle_cast({remove_source_port, IP, Port, SourcePort, _Opts}, State) ->
-    Pool = get_addr_pool(IP, Port, State),
-    ets:delete(Pool, SourcePort),
-    AgingPool = get_addr_aging_pool(IP, Port, State),
-    ets:delete(AgingPool, SourcePort),
-    {noreply, State}.
+handle_cast({return_source_port, IP, Port, SourcePort, _Opts}, 
+        State=#{port_range := PortRange}) ->
+    case port_in_range(SourcePort, PortRange) of
+        true ->
+            Pool = get_addr_pool(IP, Port, State),
+            ets:insert(Pool, pool_entry(SourcePort)),
+            {noreply, State};
+        false ->
+            {noreply, State}
+    end;
+handle_cast({age_source_port, IP, Port, SourcePort, _Opts},
+        State=#{port_range := PortRange}) ->
+    case port_in_range(SourcePort, PortRange) of
+        true ->
+            AgingPool = get_addr_aging_pool(IP, Port, State),
+            ets:insert(AgingPool, pool_entry(SourcePort)),
+            {noreply, State};
+        false ->
+            {noreply, State}
+    end;
+handle_cast({remove_source_port, IP, Port, SourcePort, _Opts},
+        State=#{port_range := PortRange}) ->
+    case port_in_range(SourcePort, PortRange) of
+        true ->
+            Pool = get_addr_pool(IP, Port, State),
+            ets:delete(Pool, SourcePort),
+            AgingPool = get_addr_aging_pool(IP, Port, State),
+            ets:delete(AgingPool, SourcePort),
+            {noreply, State};
+        false ->
+            {noreply, State}
+    end.
 
 handle_info(aging_flush, State) ->
     case do_aging_flush(State) of
@@ -205,3 +223,8 @@ do_aging_flush(AgingPools, State=#{addr_map := Map}) ->
         true ->
             []
     end.
+
+port_in_range(Port, {RangeFirst, RangeLast}) when Port >= RangeFirst andalso Port =< RangeLast ->
+    true;
+port_in_range(_, _) ->
+    false.
