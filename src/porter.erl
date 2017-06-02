@@ -20,7 +20,7 @@ connect(Module, IP, Port, Opts) ->
 % its own. This is likely because in a bind-before-connect scenario, the source
 % port must be determined before the kernel is made aware of the address.
 connect(Module, IP={_,_,_,_}, Port, Opts, Timeout) ->
-    connect_attempt(Module, IP, Port, Opts, Timeout, undefined, ok, []).
+    connect_attempt(Module, IP, Port, Opts, Timeout, undefined, []).
 
 % @doc If the client side closed the socket, the source port is immediately
 % returned to the pool. This is because Linux does not put the socket in the
@@ -36,10 +36,24 @@ close(Module, Socket, #{ip := IP, port := Port, source_port := MySrcPort, opts :
 on_closed(#{ip := IP, port := Port, source_port := MySrcPort, opts := Opts}) ->
     porter_svr:age_source_port(IP, Port, MySrcPort, Opts).
 
-connect_attempt(_Module, IP, Port, Opts, _Timeout, 0, LastResponse, BadPorts) ->
+connect_attempt(Module, IP, Port, Opts, Timeout, 0, BadPorts) ->
     [ porter_svr:age_source_port(IP, Port, X, Opts) || X <- BadPorts ],
-    LastResponse;
-connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, _LastResponse, BadPorts) ->
+
+    % give the kernel one last chance to pick the source port
+    Opts2 = modify_opts(0, Opts),
+    case Module:connect(IP, Port, Opts2, Timeout) of
+        {ok, Socket} ->
+            MySrcPort = ensure_source_port_tracked(Module, Socket,
+                IP, Port, 0, Opts),
+            PorterState = #{ip => IP,
+                port => Port,
+                source_port => MySrcPort,
+                opts => Opts},
+            {ok, Socket, PorterState};
+        Err ->
+            Err
+    end;
+connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, BadPorts) ->
     AgeBadPorts = fun() ->
            [ porter_svr:age_source_port(IP, Port, X, Opts) || X <- BadPorts ]
         end,
@@ -49,9 +63,8 @@ connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, _LastRespons
         _ ->
             0
     end,
-    Opts2 = lists:keystore(port, 1, Opts, {port, MySrcPort}),
-    Opts3 = lists:keystore(reuseaddr, 1, Opts2, {reuseaddr, true}),
-    case Module:connect(IP, Port, Opts3, Timeout) of
+    Opts2 = modify_opts(MySrcPort, Opts),
+    case Module:connect(IP, Port, Opts2, Timeout) of
         PortError={error, Reason} when Reason =:= eaddrnotavail orelse
                                        Reason =:= eaddrinuse ->
             % eaddrnotavail is returned from a connect() system call when there
@@ -72,7 +85,7 @@ connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, _LastRespons
                 _ ->
                     RemAttempts2 = get_remaining_connect_attempts(RemainingAttempts),
                     connect_attempt(Module, IP, Port, Opts, Timeout, RemAttempts2,
-                        PortError, [MySrcPort|BadPorts])
+                        [MySrcPort|BadPorts])
             end;
         {error, Reason} ->
             AgeBadPorts(),
@@ -88,6 +101,11 @@ connect_attempt(Module, IP, Port, Opts, Timeout, RemainingAttempts, _LastRespons
                             opts => Opts},
             {ok, Socket, PorterState}
     end.
+
+modify_opts(Port, Opts) ->
+    Opts2 = lists:keystore(port, 1, Opts, {port, Port}),
+    Opts3 = lists:keystore(reuseaddr, 1, Opts2, {reuseaddr, true}),
+    Opts3.
 
 get_remaining_connect_attempts(undefined) ->
     Policy = application:get_env(porter, retry_policy, []),
