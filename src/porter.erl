@@ -22,19 +22,18 @@ connect(Module, IP, Port, Opts) ->
 connect(Module, IP={_,_,_,_}, Port, Opts, Timeout) ->
     connect_attempt(Module, IP, Port, Opts, Timeout, undefined, []).
 
-% @doc If the client side closed the socket, the source port is immediately
-% returned to the pool. This is because Linux does not put the socket in the
-% TIME-WAIT state
+% @doc If the client side closed the socket, tcp puts the socket into TIME-WAIT
+% so we have to age the port
 close(Module, Socket, #{ip := IP, port := Port, source_port := MySrcPort, opts := Opts}) ->
     Res = Module:close(Socket),
-    porter_svr:return_source_port(IP, Port, MySrcPort, Opts),
+    porter_svr:age_source_port(IP, Port, MySrcPort, Opts),
     Res.
 
-% @doc When the socket is closed unexpectedly, the user of this library must
-% use this function to return the source port back to the aging pool. We are
-% assuming that the port is in TIME-WAIT state
+% @doc When the socket is closed by the server, the user of this library must
+% use this function to return the source port back to the pool. We are
+% assuming the port does not enter the TIME-WAIT state
 on_closed(#{ip := IP, port := Port, source_port := MySrcPort, opts := Opts}) ->
-    porter_svr:age_source_port(IP, Port, MySrcPort, Opts).
+    porter_svr:return_source_port(IP, Port, MySrcPort, Opts).
 
 connect_attempt(Module, IP, Port, Opts, Timeout, 0, BadPorts) ->
     [ porter_svr:age_source_port(IP, Port, X, Opts) || X <- BadPorts ],
